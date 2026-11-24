@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#c8102e">
+<title>BRL LS App · Expenses</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+.ln{border-bottom:1px solid #eee;padding:9px 0;font-size:13px}.ln b{font-size:14px}.amt{float:right;font-weight:900;font-size:16px}
+.fl{display:inline-block;font-size:10.5px;line-height:15px;padding:1px 6px;margin:3px 4px 0 0;border-radius:2px}.fl.red{background:#fdecea;color:#b71c1c}.fl.amber{background:#fff4e0;color:#8a5300}
+.pick{display:block;width:100%;text-align:left;background:#fff;border:1px solid #e2e2e2;border-left:4px solid #1a1a1a;padding:10px;margin-bottom:8px;font-size:13px;cursor:pointer;font-family:Arial}
+.steps{display:flex;gap:3px;margin:6px 0}.steps span{flex:1;font-size:9.5px;text-align:center;padding:3px 0;background:#eee;color:#777;text-transform:uppercase;letter-spacing:.5px}.steps span.d{background:#1b5e20;color:#fff}.steps span.c{background:#c8102e;color:#fff}
+.thumb{height:64px;border-radius:2px;margin-top:4px;cursor:pointer}.run{background:#1a1a1a;color:#fff;border-left-color:#25D366}.run .muted{color:#bbb}
+.chk{display:flex;gap:6px;margin-top:6px}.chk .btn{margin-top:0}.ok-t{color:#1b5e20;font-weight:bold}.rej-t{color:#b71c1c;font-weight:bold}
+</style>
+</head>
+<body>
+<div class="top"><div><div class="k">Best Roadways · LS App · Expenses</div><div id="who" class="muted"></div></div><div class="u"><a href="/" style="color:#c8102e;font-weight:bold">← LS App</a></div></div>
+<div class="wrap" id="app"></div>
+<div class="tabs" id="tabs"><button onclick="location.href='/'">LS Home</button><button onclick="go('mine')" id="t-mine">My expenses</button><button onclick="go('claims')" id="t-claims">My claims</button><button onclick="go('appr')" id="t-appr" class="hide">Approvals</button></div>
+<script>
+/* Supervisor expenses — fooding per vehicle loaded, conveyance trips, other bills; claim → verify → approve → pay.
+   Proof photos are taken in-app only (rear camera), stamped with name, time, GPS and address. Same login as the LS App. */
+const S = JSON.parse(localStorage.getItem('ls_session') || 'null');
+const app = document.getElementById('app'), $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const rs = n => 'Rs ' + (Math.round((+n || 0) * 100) / 100).toLocaleString('en-IN');
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dd = iso => { if (!iso) return ''; const [y, m, d] = String(iso).slice(0, 10).split('-'); return d + '-' + MON[+m - 1]; };
+let ST = null, TAB = 'mine', CAM = null;
+async function api(p, body) { const r = await fetch('/api' + p, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'x-code': S.code, 'x-token': S.token }, body: body ? JSON.stringify(body) : undefined }); const j = await r.json().catch(() => ({ error: 'Server error ' + r.status })); if (r.status === 401) { localStorage.removeItem('ls_session'); location.href = '/'; throw new Error('Signed out'); } if (!r.ok) throw new Error(j.error || 'Error ' + r.status); return j; }
+function busy(t) { app.innerHTML = '<div class="center"><div class="spin"></div>' + esc(t || 'Working…') + '</div>'; }
+function msg(t, cls) { return '<div class="msg ' + (cls || 'err') + '">' + esc(t) + '</div>'; }
+function go(t) { stopCam(); TAB = t; ['mine', 'claims', 'appr'].forEach(x => $('t-' + x).classList.toggle('on', x === t)); ({ mine: renderMine, claims: renderClaims, appr: renderQueue })[t](); window.scrollTo(0, 0); }
+async function load(t) { busy('Loading…'); try { ST = await api('/exp/me'); $('who').textContent = ST.name + ' · ' + ST.branch; $('t-appr').classList.toggle('hide', !ST.roles.length); if (ST.queue) $('t-appr').textContent = 'Approvals (' + ST.queue + ')'; go(t || TAB); } catch (e) { app.innerHTML = msg(e.message); } }
+const flagsHtml = F => (F || []).map(f => '<span class="fl ' + f.lvl + '">' + esc(f.t) + '</span>').join('');
+function lineHtml(l, del) {
+  const what = l.type === 'FOODING' ? '<b>Fooding · ' + esc(l.vehicle_no) + '</b><br><span class="muted">LR ' + esc(l.lr_cn) + ' · ' + esc(l.party) + ' → ' + esc(l.to_place) + (l.slip_no ? ' · slip ' + esc(l.slip_no) : '') + '</span>'
+    : l.type === 'CONVEYANCE' ? '<b>Conveyance · ' + esc(l.from_place) + ' → ' + esc(l.to_place || '…') + '</b><br><span class="muted">' + esc(l.mode) + (l.km ? ' · ~' + l.km + ' km · fair ' + rs(l.fair) : '') + (l.live ? ' · GPS tracked' : ' · typed') + '</span>'
+    : '<b>' + esc(l.category) + '</b><br><span class="muted">' + esc([l.party, l.note].filter(Boolean).join(' · ')) + '</span>';
+  return '<div class="ln"><span class="amt">' + rs(l.amount) + '</span><span class="muted">' + dd(l.exp_date) + ' · #' + l.id + '</span><br>' + what + '<div>' + flagsHtml(l.flags) + '</div>' +
+    (l.photo ? '<img class="thumb" src="' + l.photo + '" onclick="window.open(this.src)">' : '') + (del ? ' <button class="btn ghost sm" onclick="delLine(' + l.id + ')">Remove</button>' : '') + '</div>'; }
+
+/* ---------- my expenses ---------- */
+function renderMine(note) {
+  const open = ST.lines.filter(l => l.status === 'OPEN'), run = ST.lines.find(l => l.status === 'RUNNING');
+  const tot = open.reduce((a, l) => a + l.amount, 0), reds = open.reduce((a, l) => a + l.flags.filter(f => f.lvl === 'red').length, 0);
+  app.innerHTML = (note || '') +
+    (run ? '<div class="card run"><div class="k" style="color:#25D366;font-size:11px;font-weight:bold;letter-spacing:2px">TRIP RUNNING</div><div style="font-size:17px;font-weight:bold">' + esc(run.from_place) + ' → …</div><div class="muted">' + esc(run.mode) + ' · started ' + new Date(run.start_ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '</div><button class="btn" onclick="tripEnd(' + run.id + ')">Reached — enter fare</button><button class="btn ghost sm" style="background:none;color:#bbb;border-color:#555" onclick="tripCancel(' + run.id + ')">Cancel trip</button></div>' : '') +
+    '<div class="card"><div class="h">Add expense<br><span class="r">same day, with proof</span></div>' +
+    '<button class="btn" onclick="pickLr()">Fooding · vehicle loaded (' + rs(ST.rules.foodingRate) + ')</button>' +
+    (run ? '' : '<button class="btn dark" onclick="tripStart()">Start a trip (conveyance)</button>') +
+    '<div class="row"><button class="btn ghost" onclick="convTyped()">Conveyance · type it</button><button class="btn ghost" onclick="otherForm()">Other bill</button></div>' +
+    '<p class="muted" style="margin:10px 0 0">Fooding: ' + rs(ST.rules.foodingRate) + ' per vehicle you loaded, against its LR + weighbridge slip photo. Conveyance: tap Start when you leave and Reached when you arrive — the phone records the route. Daily conveyance cap ' + rs(ST.rules.conveyance.dailyCap) + '.</p></div>' +
+    '<div class="card"><div class="h">Not yet claimed<br><span class="r">' + open.length + ' lines · ' + rs(tot) + '</span></div>' +
+    (open.map(l => lineHtml(l, true)).join('') || '<div class="muted">Nothing yet.</div>') +
+    (open.length ? (reds ? msg(reds + ' red flag(s). You can still submit — your branch head will decide those lines.', 'info') : '') + '<button class="btn" onclick="submitClaim()">Submit claim · ' + rs(tot) + '</button><p class="muted">Creates the debit voucher with all proofs attached and sends it to your branch for verification. Payment is on ' + esc(ST.rules.payDayName) + 's after approval.</p>' : '') + '</div>'; }
+async function delLine(id) { if (!confirm('Remove line #' + id + '?')) return; try { ST = (await api('/exp/line/delete', { id })).state; renderMine(); } catch (e) { alert(e.message); } }
+async function submitClaim() { const open = ST.lines.filter(l => l.status === 'OPEN'); if (!confirm('Submit ' + open.length + ' lines for ' + rs(open.reduce((a, l) => a + l.amount, 0)) + '?')) return; busy('Making the voucher…');
+  try { const r = await api('/exp/claim', {}); ST = r.state; TAB = 'claims'; go('claims'); app.insertAdjacentHTML('afterbegin', msg('Claim ' + r.claimNo + ' submitted to your branch.', 'ok')); } catch (e) { renderMine(msg(e.message)); } }
+
+/* ---------- camera with GPS stamp (rear camera, in-app only) ---------- */
+function stopCam() { if (CAM && CAM.stream) CAM.stream.getTracks().forEach(t => t.stop()); CAM = null; }
+function camHtml(label) { return '<h3>' + esc(label) + '</h3><div id="geo" class="msg info">📡 Getting GPS…</div><video id="v" autoplay playsinline muted></video><canvas id="cv" class="hide"></canvas><button class="btn dark" id="snap" onclick="snap()" disabled>Waiting for GPS…</button><button class="btn ghost hide" id="retake" onclick="retake()">Retake</button>'; }
+async function camStart(head, ctxLine) { stopCam(); CAM = { head, ctxLine, data: '', geo: null, addr: '' }; getGeo(g => { CAM.geo = g; if ($('snap')) { $('snap').disabled = false; $('snap').textContent = 'Take photo'; } });
+  try { CAM.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false }); $('v').srcObject = CAM.stream; } catch (e) { if ($('snap')) { $('snap').textContent = 'Camera blocked — allow camera for this site'; $('snap').disabled = true; } } }
+function getGeo(cb) { if (!navigator.geolocation) { $('geo').className = 'msg err'; $('geo').textContent = 'No GPS on this phone.'; return; }
+  navigator.geolocation.getCurrentPosition(async p => { const g = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), ts: new Date().toISOString(), addr: '' };
+    try { g.addr = (await api('/geocode', { lat: g.lat, lng: g.lng })).address || ''; } catch (e) {}
+    if ($('geo')) { $('geo').className = 'msg ok'; $('geo').innerHTML = '📍 ' + esc(g.addr || (g.lat.toFixed(5) + ', ' + g.lng.toFixed(5))) + ' <span class="muted">(±' + g.acc + ' m)</span>'; } cb(g); },
+    e => { if ($('geo')) { $('geo').className = 'msg err'; $('geo').textContent = 'Location blocked: ' + e.message + '. Allow location for this site and try again.'; } }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }); }
+function wrap(x, t, w, n) { const o = []; let l = ''; String(t).split(/\s+/).forEach(word => { const s = l ? l + ' ' + word : word; if (x.measureText(s).width <= w) l = s; else { if (l) o.push(l); l = word; } }); if (l) o.push(l); return o.slice(0, n); }
+function snap() { const v = $('v'), c = $('cv'); if (!v.videoWidth) return alert('Camera not ready yet.'); const W = 1024, H = Math.round(W * v.videoHeight / v.videoWidth); c.width = W; c.height = H; const x = c.getContext('2d'); x.drawImage(v, 0, 0, W, H);
+  const g = CAM.geo, now = new Date(); const ts = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-') + ' ' + now.toLocaleTimeString('en-GB', { hour12: false }) + ' IST';
+  x.font = '20px Arial'; const lines = [S.name + ' (' + S.code + ') · ' + (ST.branch || ''), CAM.ctxLine, ts, g ? g.lat.toFixed(6) + ', ' + g.lng.toFixed(6) + '  ±' + g.acc + ' m' : 'GPS unavailable'].filter(Boolean).concat(g && g.addr ? wrap(x, g.addr, W - 40, 2) : []);
+  const band = 40 + lines.length * 27; x.fillStyle = 'rgba(0,0,0,.62)'; x.fillRect(0, H - band, W, band); x.fillStyle = '#c8102e'; x.fillRect(0, H - band, W, 5); x.fillRect(0, 0, W, 38);
+  x.fillStyle = '#fff'; x.font = 'bold 20px Arial'; x.textBaseline = 'middle'; x.fillText('BEST ROADWAYS · EXPENSE PROOF · ' + CAM.head, 16, 19); x.textBaseline = 'alphabetic';
+  lines.forEach((ln, i) => { x.font = (i === 0 ? 'bold 22px' : '20px') + ' Arial'; x.fillText(ln, 18, H - band + 34 + 27 * i); });
+  CAM.data = c.toDataURL('image/jpeg', 0.72); CAM.meta = g ? { lat: g.lat, lng: g.lng, ts: now.toISOString(), addr: g.addr } : null;
+  c.classList.remove('hide'); v.classList.add('hide'); $('snap').classList.add('hide'); $('retake').classList.remove('hide'); CAM.stream && CAM.stream.getTracks().forEach(t => t.stop()); }
+function retake() { const h = CAM.head, l = CAM.ctxLine; $('cv').classList.add('hide'); $('v').classList.remove('hide'); $('snap').classList.remove('hide'); $('retake').classList.add('hide'); camStart(h, l); }
+const inp = (id, label, val, o) => { o = o || {}; return '<div><label>' + esc(label) + (o.req ? ' <span class="req">*</span>' : '') + '</label>' + (o.options ? '<select id="' + id + '">' + o.options.map(x => '<option' + (x === val ? ' selected' : '') + '>' + esc(x) + '</option>').join('') + '</select>' : '<input id="' + id + '" value="' + esc(val || '') + '"' + (o.type ? ' type="' + o.type + '"' : '') + (o.im ? ' inputmode="' + o.im + '"' : '') + (o.ph ? ' placeholder="' + esc(o.ph) + '"' : '') + (o.max ? ' max="' + o.max + '"' : '') + '>') + '</div>'; };
+const val = id => ($(id) ? $(id).value.trim() : '');
+
+/* ---------- fooding ---------- */
+function pickLr() { app.innerHTML = '<div class="card"><div class="h">Fooding<br><span class="r">which vehicle did you load?</span></div><p class="muted">Your LRs from the last ' + ST.rules.maxLrAgeDays + ' days that do not have fooding yet.</p>' +
+  (ST.lrs.map(l => '<button class="pick" onclick="foodForm(' + l.id + ')"><b>' + esc(l.vehicle) + '</b> · ' + dd(l.date) + '<br><span class="muted">LR ' + esc(l.cn) + ' · ' + esc(l.party) + ' → ' + esc(l.to) + '</span></button>').join('') || '<div class="muted">No LRs pending. Make the LR in the app first.</div>') +
+  '<button class="btn ghost" onclick="foodForm(0)">LR not made in the app</button><button class="btn ghost" onclick="go(\'mine\')">Back</button></div>'; }
+function foodForm(id) { const l = ST.lrs.find(x => x.id === id);
+  app.innerHTML = '<div class="card"><div class="h">Fooding · ' + rs(ST.rules.foodingRate) + '<br><span class="r">' + (l ? esc(l.vehicle) : 'LR not in app') + '</span></div>' +
+    (l ? '<div class="msg ok">LR ' + esc(l.cn) + ' · ' + dd(l.date) + ' · ' + esc(l.party) + ' → ' + esc(l.to) + '</div>'
+      : msg('Use only for loadings done on a paper/ERP LR. These lines are checked against ERP by your branch.', 'info') + '<div class="row">' + inp('f_date', 'Loading date', ST.today, { type: 'date', req: 1, max: ST.today }) + inp('f_lr', 'LR no.', '', { req: 1, im: 'numeric' }) + '</div><div class="row">' + inp('f_veh', 'Vehicle no.', '', { req: 1, ph: 'RJ14GK5477' }) + inp('f_to', 'Destination', '', { req: 1 }) + '</div>' + inp('f_party', 'Party / company', '', { req: 1 })) +
+    inp('f_slip', 'Weighbridge slip / receipt no.', '', { ph: 'if printed on the slip' }) + camHtml('Photo · weighbridge slip (or loaded vehicle with number plate)') +
+    '<div id="m"></div><button class="btn" id="save" onclick="saveFood(' + (l ? l.id : 0) + ')">Save fooding line</button><button class="btn ghost" onclick="pickLr()">Back</button></div>';
+  camStart('FOODING', l ? 'Vehicle ' + l.vehicle + ' · LR ' + l.cn : 'Fooding · vehicle loaded'); }
+async function saveFood(lrId) { if (!CAM || !CAM.data) return $('m').innerHTML = msg('Take the photo first.');
+  const b = { type: 'FOODING', slip_no: val('f_slip'), photo: CAM.data, photoMeta: CAM.meta };
+  if (lrId) b.lr_id = lrId; else Object.assign(b, { exp_date: val('f_date'), lr_cn: val('f_lr'), vehicle_no: val('f_veh'), to_place: val('f_to'), party: val('f_party') });
+  await post('/exp/line', b, 'Fooding saved'); }
+async function post(p, b, okText) { $('save').disabled = true; $('save').textContent = 'Saving…';
+  try { const r = await api(p, b); ST = r.state; stopCam(); const F = r.flags || []; renderMine(msg(okText + (r.km != null ? ' · ~' + r.km + ' km, fair fare ' + rs(r.fair) : '') + (F.length ? ' — with ' + F.length + ' flag(s) for your branch to see.' : '.'), F.some(f => f.lvl === 'red') ? 'info' : 'ok')); window.scrollTo(0, 0); }
+  catch (e) { $('save').disabled = false; $('save').textContent = 'Save'; $('m').innerHTML = msg(e.message); $('m').scrollIntoView(); } }
+
+/* ---------- conveyance ---------- */
+const modes = () => ST.rules.conveyance.modes;
+function tripStart() { app.innerHTML = '<div class="card"><div class="h">Start trip<br><span class="r">tap when you leave</span></div>' + inp('t_from', 'From', ST.lastTo || '', { req: 1, ph: 'e.g. Anjur Phata' }) + inp('t_mode', 'Mode', modes()[0], { options: modes() }) + inp('t_note', 'Purpose', '', { ph: 'e.g. to Mankoli yard for loading' }) +
+  '<div id="geo" class="msg info">📡 Getting GPS…</div><div id="m"></div><button class="btn" id="save" disabled onclick="doStart()">Start</button><button class="btn ghost" onclick="go(\'mine\')">Back</button></div>'; getGeo(g => { window._g = g; $('save').disabled = false; }); }
+async function doStart() { const g = window._g; if (!val('t_from')) return $('m').innerHTML = msg('Type where you start from.'); $('save').disabled = true;
+  try { ST = (await api('/exp/trip/start', { lat: g.lat, lng: g.lng, from_place: val('t_from'), mode: val('t_mode'), note: val('t_note') })).state; renderMine(msg('Trip started. Tap Reached when you arrive.', 'ok')); } catch (e) { $('save').disabled = false; $('m').innerHTML = msg(e.message); } }
+function tripEnd(id) { const run = ST.lines.find(l => l.id === id); const C = ST.rules.conveyance;
+  app.innerHTML = '<div class="card"><div class="h">Reached<br><span class="r">' + esc(run.from_place) + ' → ?</span></div>' + inp('t_to', 'Reached at', '', { req: 1, ph: 'e.g. Mankoli' }) + '<div class="row">' + inp('t_amt', 'Fare paid (Rs)', '', { req: 1, im: 'decimal' }) + inp('t_mode', 'Mode', run.mode, { options: modes() }) + '</div>' +
+    '<p class="muted">Ticket / receipt photo is needed above ' + rs(C.ticketAbove) + '. Fair fare is worked out from the GPS distance (min ' + rs(C.minFare) + ', ' + rs(C.perKm) + '/km).</p>' +
+    '<label><input type="checkbox" id="t_ph" style="width:auto" onchange="this.checked?(document.getElementById(\'camw\').classList.remove(\'hide\'),camStart(\'CONVEYANCE\',\'Ticket · ' + esc(run.from_place).replace(/'/g, '') + '\')):(document.getElementById(\'camw\').classList.add(\'hide\'),stopCam())"> Add ticket / receipt photo</label><div id="camw" class="hide">' + camHtml('Ticket photo') + '</div>' +
+    '<div id="geo2" class="msg info">📡 Getting GPS…</div><div id="m"></div><button class="btn" id="save" disabled onclick="doEnd(' + id + ')">Save trip</button><button class="btn ghost" onclick="go(\'mine\')">Back</button></div>';
+  navigator.geolocation.getCurrentPosition(p => { window._g2 = { lat: p.coords.latitude, lng: p.coords.longitude }; $('geo2').className = 'msg ok'; $('geo2').textContent = '📍 Location locked (±' + Math.round(p.coords.accuracy) + ' m)'; $('save').disabled = false; }, e => { $('geo2').className = 'msg err'; $('geo2').textContent = 'Location blocked: ' + e.message; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }); }
+async function doEnd(id) { const g = window._g2; const run = ST.lines.find(l => l.id === id); const to = val('t_to');
+  await post('/exp/trip/end', { id, lat: g.lat, lng: g.lng, to_place: to, amount: val('t_amt'), mode: val('t_mode'), photo: CAM && CAM.data ? CAM.data : null }, 'Trip saved');
+  if (ST.lines.some(l => l.id === id && l.status === 'RUNNING')) return;
+  ST.lastTo = to; if (run) app.insertAdjacentHTML('afterbegin', '<button class="btn ghost" onclick="ST.lastTo=\'' + esc(to).replace(/'/g, '') + '\';tripStart()">Start return / next trip from ' + esc(to) + '</button>'); }
+async function tripCancel(id) { if (!confirm('Cancel this running trip?')) return; ST = (await api('/exp/trip/cancel', { id })).state; renderMine(); }
+function convTyped() { app.innerHTML = '<div class="card"><div class="h">Conveyance<br><span class="r">typed (not tracked)</span></div>' + msg('Typed trips are flagged for your branch. Next time use Start trip.', 'info') +
+  '<div class="row">' + inp('c_date', 'Date', ST.today, { type: 'date', req: 1, max: ST.today }) + inp('c_mode', 'Mode', modes()[0], { options: modes() }) + '</div><div class="row">' + inp('c_from', 'From', '', { req: 1 }) + inp('c_to', 'To', '', { req: 1 }) + '</div>' + inp('c_amt', 'Fare (Rs)', '', { req: 1, im: 'decimal' }) + inp('c_note', 'Purpose', '') +
+  '<label><input type="checkbox" id="c_ph" style="width:auto" onchange="this.checked?(document.getElementById(\'camw\').classList.remove(\'hide\'),camStart(\'CONVEYANCE\',\'Ticket\')):(document.getElementById(\'camw\').classList.add(\'hide\'),stopCam())"> Add ticket photo</label><div id="camw" class="hide">' + camHtml('Ticket photo') + '</div>' +
+  '<div id="m"></div><button class="btn" id="save" onclick="post(\'/exp/line\',{type:\'CONVEYANCE\',exp_date:val(\'c_date\'),from_place:val(\'c_from\'),to_place:val(\'c_to\'),mode:val(\'c_mode\'),amount:val(\'c_amt\'),note:val(\'c_note\'),photo:CAM&&CAM.data?CAM.data:null,photoMeta:CAM&&CAM.meta},\'Conveyance saved\')">Save</button><button class="btn ghost" onclick="go(\'mine\')">Back</button></div>'; }
+
+/* ---------- other bill ---------- */
+function otherForm() { app.innerHTML = '<div class="card"><div class="h">Other bill<br><span class="r">photo of the bill is a must</span></div><div class="row">' + inp('o_date', 'Date', ST.today, { type: 'date', req: 1, max: ST.today }) + inp('o_amt', 'Amount (Rs)', '', { req: 1, im: 'decimal' }) + '</div>' +
+  inp('o_cat', 'What for', ST.rules.other.categories[0], { options: ST.rules.other.categories }) + '<div class="row">' + inp('o_party', 'Paid to (shop / person)', '') + inp('o_veh', 'Vehicle no. (if any)', '') + '</div>' + inp('o_note', 'Reason', '', { ph: 'needed above ' + rs(ST.rules.other.needNoteAbove) }) + camHtml('Photo · bill / receipt') +
+  '<div id="m"></div><button class="btn" id="save" onclick="post(\'/exp/line\',{type:\'OTHER\',exp_date:val(\'o_date\'),amount:val(\'o_amt\'),category:val(\'o_cat\'),party:val(\'o_party\'),vehicle_no:val(\'o_veh\'),note:val(\'o_note\'),photo:CAM&&CAM.data?CAM.data:null,photoMeta:CAM&&CAM.meta},\'Bill saved\')">Save</button><button class="btn ghost" onclick="go(\'mine\')">Back</button></div>';
+  camStart('OTHER', 'Bill'); }
+
+/* ---------- claims ---------- */
+function stepper(c) { const order = ['SUBMITTED', 'VERIFIED', 'APPROVED', 'PAID']; const at = order.indexOf(c.status);
+  return '<div class="steps">' + ['Submitted', 'Verified', 'Approved', 'Paid'].map((s, i) => '<span class="' + (c.status === 'RETURNED' ? '' : i <= at ? 'd' : i === at + 1 ? 'c' : '') + '">' + s + '</span>').join('') + '</div>'; }
+function claimCard(c, open) { const next = { SUBMITTED: 'branch verification by ' + dd(c.verify_plan), VERIFIED: 'approval by ' + dd(c.approve_plan), APPROVED: 'payment on ' + dd(c.pay_plan) }[c.status];
+  return '<div class="card"><span class="amt">' + rs(c.approved_amount) + '</span><b>' + esc(c.claim_no) + '</b><br><span class="muted">' + (open ? esc(c.name) + ' · ' + esc(c.branch) + ' · ' : '') + dd(c.from_date) + ' to ' + dd(c.to_date) + ' · ' + c.line_count + ' lines' + (c.red_flags ? ' · <span style="color:#b71c1c">' + c.red_flags + ' red flags</span>' : '') + '</span>' + stepper(c) +
+    (c.status === 'RETURNED' ? msg('Returned by ' + c.returned_by + ': ' + c.return_reason + ' — lines are back in My expenses. Fix and submit again.') : c.status === 'PAID' ? '<div class="muted">Paid ' + esc(c.paid_ts) + ' · ' + esc(c.pay_mode) + ' ' + esc(c.pay_ref) + '</div>' : '<div class="muted">Waiting for ' + next + '</div>') +
+    (c.amount !== c.approved_amount ? '<div class="muted">Claimed ' + rs(c.amount) + '</div>' : '') +
+    '<div class="row">' + (c.pdf ? '<a class="btn ghost sm" href="' + c.pdf + '" target="_blank">Voucher PDF</a>' : '') + (open ? '<button class="btn sm" onclick="openClaim(' + c.id + ')">Open & check</button>' : '<button class="btn ghost sm" onclick="openClaim(' + c.id + ',1)">Lines</button>') + '</div></div>'; }
+function renderClaims() { app.innerHTML = '<div class="card"><div class="h">My claims<br><span class="r">last 12</span></div></div>' + (ST.claims.map(c => claimCard(c)).join('') || '<div class="card muted">No claims yet.</div>'); }
+
+/* ---------- approvals ---------- */
+let Q = null, CUR = null;
+async function renderQueue() { busy('Loading approvals…'); try { Q = await api('/exp/queue'); } catch (e) { app.innerHTML = msg(e.message); return; }
+  const roles = Q.roles.map(r => r.role + ' (' + r.branches + ')').join(', ');
+  app.innerHTML = '<div class="card"><div class="h">Approvals<br><span class="r">' + Q.claims.length + ' waiting on you</span></div><div class="muted">Your role: ' + esc(roles) + '. Oldest first (FIFO).</div></div>' + (Q.claims.map(c => claimCard(c, true)).join('') || '<div class="card muted">Nothing pending. 👍</div>'); }
+async function openClaim(id, ro) { busy('Opening…'); let d; try { d = await api('/exp/claim/' + id); } catch (e) { app.innerHTML = msg(e.message); return; } CUR = d; const c = d.claim; const step = { SUBMITTED: 'VERIFY', VERIFIED: 'APPROVE', APPROVED: 'PAY' }[c.status]; const act = !ro && Q && Q.claims.some(x => x.id === c.id);
+  const lineBox = l => lineHtml(l) + (l.check_status !== 'PENDING' ? '<div class="' + (l.check_status === 'OK' ? 'ok-t' : 'rej-t') + '" style="font-size:12px">' + (l.check_status === 'OK' ? '✓ OK' : '✗ Rejected: ' + esc(l.check_reason)) + ' · ' + esc(l.checked_by || '') + '</div>' : '') +
+    (act && step !== 'PAY' ? '<div class="chk"><button class="btn sm" onclick="chk(' + l.id + ',1)">OK</button><button class="btn ghost sm" onclick="chk(' + l.id + ',0)">Reject</button>' + (l.lr_id ? '' : '') + '</div>' : '');
+  app.innerHTML = '<div class="card"><span class="amt">' + rs(c.approved_amount) + '</span><div class="h">' + esc(c.claim_no) + '<br><span class="r">' + esc(c.name) + '</span></div><div class="muted">' + esc(c.branch) + ' · ' + esc(c.code) + ' · ' + dd(c.from_date) + ' to ' + dd(c.to_date) + ' · this month so far ' + rs(d.personMonth) + '</div>' + stepper(c) +
+    (c.pdf ? '<a class="btn ghost sm" href="' + c.pdf + '" target="_blank">Voucher PDF</a>' : '') + '</div>' +
+    '<div class="card"><h3 style="margin-top:0">Lines (' + d.lines.length + ')</h3>' + d.lines.map(lineBox).join('') + '</div>' +
+    (act ? '<div class="card"><div id="m"></div>' + (step === 'VERIFY' ? '<p class="muted">Tick or reject each red-flag line. Others become OK when you verify.</p><button class="btn" id="save" onclick="act(\'VERIFY\')">Verify claim</button>' : step === 'APPROVE' ? '<button class="btn" id="save" onclick="act(\'APPROVE\')">Approve ' + rs(c.approved_amount) + '</button>' :
+      '<div class="row">' + inp('p_mode', 'Paid by', 'Cash', { options: ['Cash', 'Bank transfer', 'UPI'] }) + inp('p_ref', 'Cash voucher no. / UTR', '', { req: 1 }) + '</div><button class="btn" id="save" onclick="act(\'PAY\')">Mark paid ' + rs(c.approved_amount) + '</button>') +
+      (step !== 'PAY' ? '<button class="btn ghost" onclick="act(\'RETURN\')">Return to supervisor</button>' : '') + '</div>' : '') +
+    '<div class="card"><h3 style="margin-top:0">History</h3>' + d.log.map(g => '<div class="muted">' + esc(g.ts) + ' · ' + esc(g.by_name) + ' · ' + esc(g.action) + (g.note ? ' · ' + esc(g.note) : '') + '</div>').join('') + '</div><button class="btn ghost" onclick="go(\'' + (act ? 'appr' : TAB) + '\')">Back</button>'; window.scrollTo(0, 0); }
+async function chk(id, ok) { let reason = ''; if (!ok) { reason = prompt('Why is line #' + id + ' rejected?'); if (!reason) return; } try { await api('/exp/line/check', { id, ok: !!ok, reason }); openClaim(CUR.claim.id); } catch (e) { alert(e.message); } }
+async function act(action) { const b = { id: CUR.claim.id, action }; if (action === 'RETURN') { b.reason = prompt('Why is this claim returned?'); if (!b.reason) return; } if (action === 'PAY') { b.pay_mode = val('p_mode'); b.pay_ref = val('p_ref'); }
+  if (!confirm(action.charAt(0) + action.slice(1).toLowerCase() + ' ' + CUR.claim.claim_no + '?')) return;
+  try { await api('/exp/claim/act', b); ST = await api('/exp/me'); if (ST.queue) $('t-appr').textContent = 'Approvals (' + ST.queue + ')'; else $('t-appr').textContent = 'Approvals'; await renderQueue(); app.insertAdjacentHTML('afterbegin', msg(CUR.claim.claim_no + ': ' + action.toLowerCase() + ' done.', 'ok')); } catch (e) { if ($('m')) $('m').innerHTML = msg(e.message); else alert(e.message); } }
+
+if (!S) { app.innerHTML = '<div class="card"><div class="h">Expenses<br><span class="r">sign in first</span></div><a class="btn" href="/">Open the LS App and sign in</a></div>'; $('tabs').classList.add('hide'); }
+else load(new URLSearchParams(location.search).get('tab') || 'mine');
+</script>
+</body>
+</html>

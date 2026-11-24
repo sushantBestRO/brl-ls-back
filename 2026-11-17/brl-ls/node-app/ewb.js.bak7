@@ -1,0 +1,44 @@
+// Whitebooks e-way bill API client. Auth token cached in memory (~90 min), auto-refreshed on 401.
+const axios = require('axios');
+const E = process.env;
+let token = null, tokenAt = 0;
+
+const headers = t => { const h = { client_id: E.EWB_CLIENT_ID, client_secret: E.EWB_CLIENT_SECRET, gstin: E.EWB_GSTIN, ip_address: E.EWB_IP }; if (t && t !== '__session__') { h['auth-token'] = t; h['authtoken'] = t; } return h; };
+function findKey(o, re) { if (!o || typeof o !== 'object') return null; for (const k in o) if (re.test(k) && o[k] && typeof o[k] !== 'object') return o[k]; for (const k in o) if (o[k] && typeof o[k] === 'object') { const v = findKey(o[k], re); if (v) return v; } return null; }
+
+async function auth(force) {
+  if (!force && token && Date.now() - tokenAt < 90 * 60000) return token;
+  const r = await axios.get(E.EWB_BASE_URL + E.EWB_AUTH_PATH, { params: { email: E.EWB_EMAIL, username: E.EWB_USERNAME, password: E.EWB_PASSWORD }, headers: headers(), timeout: 20000, validateStatus: () => true });
+  let t = findKey(r.data, /auth.?token|^token$/i);
+  if (!t && r.data && typeof r.data === 'object' && String(r.data.status_cd) === '1') t = '__session__'; // Whitebooks: login ok, no token returned
+  if (!t) throw new Error('E-way bill API authentication failed (' + r.status + '): ' + JSON.stringify(r.data).slice(0, 200));
+  token = t; tokenAt = Date.now(); return token;
+}
+
+async function getEwb(ewbNo) {
+  ewbNo = String(ewbNo || '').replace(/\D/g, ''); if (ewbNo.length !== 12) throw new Error('E-way bill number must be 12 digits');
+  let t = await auth(false);
+  const call = tk => axios.get(E.EWB_BASE_URL + E.EWB_GET_PATH, { params: { email: E.EWB_EMAIL, ewbNo }, headers: headers(tk), timeout: 25000, validateStatus: () => true });
+  let r = await call(t);
+  const bodyTxt = JSON.stringify(r.data || '');
+  if (r.status === 401 || (r.status !== 200 && /token|expired|unauth/i.test(bodyTxt))) { t = await auth(true); r = await call(t); }
+  let d = r.data; if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) {} }
+  let data = d && d.data && typeof d.data === 'object' ? d.data : d; if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) {} }
+  if (!data || !data.ewbNo) { const msg = (d && (d.status_desc || d.message || (d.error && (d.error.message || JSON.stringify(d.error))))) || JSON.stringify(d).slice(0, 200); throw new Error('E-way bill not found or API error: ' + msg); }
+  return { raw: r.data, lr: mapToLr(data) };
+}
+
+function mapToLr(d) {
+  const veh = d.VehiclListDetails || d.vehicleListDetails || d.vehiclListDetails || []; const last = veh.length ? veh[veh.length - 1] : {};
+  const addr = (a1, a2, pl, pin) => [a1, a2, [pl, pin].filter(Boolean).join(' - ')].filter(Boolean).join(', ');
+  return {
+    ewbNo: String(d.ewbNo || ''), ewbDate: d.ewayBillDate || '', validTill: d.validUpto || '', ewbStatus: d.status || '',
+    consignorName: d.fromTrdName || '', consignorAddr: addr(d.fromAddr1, d.fromAddr2, d.fromPlace, d.fromPincode), consignorGstin: d.fromGstin || '',
+    consigneeName: d.toTrdName || '', consigneeAddr: addr(d.toAddr1, d.toAddr2, d.toPlace, d.toPincode), consigneeGstin: d.toGstin || '',
+    loadingStation: d.fromPlace || '', deliveryStation: d.toPlace || '', vehicleNo: String(last.vehicleNo || d.vehicleNo || '').toUpperCase(),
+    invoiceNo: d.docNo || '', invoiceDate: d.docDate || '', invoiceValue: d.totInvValue || d.totalValue || '', distanceKm: d.actualDist || '',
+    transporterId: d.transporterId || '', transDocNo: d.transDocNo || last.transDocNo || '',
+    items: (d.itemList || []).map(i => ({ product: [i.productName, i.productDesc].filter(Boolean).join(' - ').slice(0, 60), pkgs: i.quantity || '', type: i.qtyUnit || '' }))
+  };
+}
+module.exports = { auth, getEwb, mapToLr };

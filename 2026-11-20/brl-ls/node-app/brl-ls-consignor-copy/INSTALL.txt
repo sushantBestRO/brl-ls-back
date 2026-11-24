@@ -1,0 +1,14 @@
+Consignor copy + optional consignor name/mobile
+================================================
+Copy these 5 files over the same paths in your node-app folder
+(keep your own .env, data/ and storage/ untouched):
+
+  db.js            -> node-app/db.js
+  lrpdf.js         -> node-app/lrpdf.js
+  server.js        -> node-app/server.js
+  public/app.js    -> node-app/public/app.js
+  public/admin.html-> node-app/public/admin.html
+
+Then restart the app (docker restart / npm start).
+The database upgrades itself on start (3 new columns on `lrs`); no data is lost.
+Old LRs keep working; they simply have no Consignor copy link.
